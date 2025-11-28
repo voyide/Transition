@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TRANSITION</title>
+    <style>
+        :root {
+            --bg: #050505;
+            --surface: #111;
+            --primary: #00ffcc;
+            --text: #fff;
+            --font: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            display: flex;
+            flex-direction: column;
+            /* Changed to 100dvh to account for mobile browser bars */
+            height: 100dvh; 
+            overflow: hidden;
+        }
+
+        /* Canvas Stage */
+        #stage {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #000 100%);
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            box-shadow: 0 0 40px rgba(0, 255, 204, 0.05);
+            border-radius: 4px;
+            object-fit: contain;
+        }
+
+        #status-pill {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid #333;
+            padding: 8px 16px;
+            border-radius: 30px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            transition: opacity 0.3s;
+            opacity: 0;
+            z-index: 20;
+        }
+
+        .rec-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #ff3333;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #ff3333;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+
+        /* Controls */
+        #ui-panel {
+            /* flex-shrink ensures the panel size is respected */
+            flex-shrink: 0; 
+            height: 180px;
+            background: var(--surface);
+            border-top: 1px solid #222;
+            display: flex;
+            flex-direction: column;
+            padding: 0 24px;
+            z-index: 10;
+            
+            /* Safe area padding for devices with gesture bars/notches */
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid #222;
+        }
+
+        h1 { font-size: 16px; margin: 0; color: var(--primary); text-transform: uppercase; letter-spacing: 2px; }
+
+        .controls { display: flex; gap: 12px; }
+
+        button {
+            background: #222;
+            color: #ccc;
+            border: 1px solid #333;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s;
+            text-transform: uppercase;
+        }
+
+        button:hover:not(:disabled) { background: #333; color: white; border-color: #555; }
+        
+        button.action {
+            background: var(--primary);
+            color: #000;
+            border: none;
+        }
+        
+        button.action:hover:not(:disabled) {
+            background: #fff;
+            box-shadow: 0 0 15px rgba(0,255,204,0.4);
+        }
+
+        button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+        /* Timeline / Queue */
+        #timeline {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            overflow-x: auto;
+            padding: 15px 0;
+            /* Scrollbar styling */
+            scrollbar-width: thin;
+            scrollbar-color: #333 #111;
+        }
+
+        .thumb {
+            width: 60px;
+            height: 60px;
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+            border: 2px solid #333;
+            transition: 0.2s;
+            flex-shrink: 0;
+        }
+
+        .thumb img { width: 100%; height: 100%; object-fit: cover; opacity: 0.5; }
+        
+        .thumb.active { border-color: var(--primary); transform: scale(1.1); box-shadow: 0 5px 20px rgba(0,0,0,0.5); z-index: 2; }
+        .thumb.active img { opacity: 1; }
+
+        .arrow { color: #444; font-size: 12px; }
+
+    </style>
+</head>
+<body>
+
+    <div id="stage">
+        <canvas id="canvas"></canvas>
+        <div id="status-pill">
+            <div class="rec-dot"></div>
+            <span id="status-text">RECORDING</span>
+        </div>
+    </div>
+
+    <div id="ui-panel">
+        <div class="header">
+            <h1></h1>
+            <div class="controls">
+                <input type="file" id="files" multiple accept="image/*" hidden>
+                <button onclick="document.getElementById('files').click()">+ Load Images</button>
+                <button id="btn-run" class="action" onclick="runSequence()" disabled>Start Sequence</button>
+            </div>
+        </div>
+        <div id="timeline">
+            <div style="color: #555; font-size:12px;">Select multiple images to begin...</div>
+        </div>
+    </div>
+
+    <script>
+        // --- Engine Constants ---
+        const WIDTH = 800; // Internal render resolution
+        const HEIGHT = 600;
+        const FRAMES_TRANSITION = 120; // 2 seconds morph
+        const FRAMES_HOLD = 45; // 0.75 seconds hold
+
+        // --- State ---
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const timeline = document.getElementById('timeline');
+        const btnRun = document.getElementById('btn-run');
+        const statusPill = document.getElementById('status-pill');
+        const statusText = document.getElementById('status-text');
+
+        let images = [];
+        let pixelBuffers = [];
+        let isRunning = false;
+        
+        // --- Setup ---
+        document.getElementById('files').onchange = async (e) => {
+            const files = Array.from(e.target.files);
+            if(files.length < 2) return alert("Select at least 2 images.");
+            
+            // Reset
+            timeline.innerHTML = '';
+            images = [];
+            pixelBuffers = [];
+            
+            // Load
+            for(let i=0; i<files.length; i++) {
+                const img = await loadFile(files[i]);
+                images.push(img);
+                addThumb(img.src, i);
+                if(i < files.length -1) addArrow();
+            }
+
+            // Init Canvas (Fit to first image aspect, but max 800 width)
+            const aspect = images[0].width / images[0].height;
+            canvas.width = WIDTH;
+            canvas.height = Math.round(WIDTH / aspect);
+
+            // Generate Buffers (Pre-process all pixels)
+            statusPill.style.opacity = 1;
+            statusText.innerText = "PROCESSING BUFFERS...";
+            document.querySelector('.rec-dot').style.display = 'none'; // Hide red dot for loading
+            
+            // Allow UI update
+            await new Promise(r => setTimeout(r, 50));
+            
+            generateBuffers();
+            
+            // Ready
+            statusPill.style.opacity = 0;
+            ctx.putImageData(pixelBuffers[0], 0, 0);
+            btnRun.disabled = false;
+        };
+
+        function addThumb(src, idx) {
+            const div = document.createElement('div');
+            div.className = 'thumb';
+            div.id = `t-${idx}`;
+            const img = new Image();
+            img.src = src;
+            div.appendChild(img);
+            timeline.appendChild(div);
+        }
+
+        function addArrow() {
+            const div = document.createElement('div');
+            div.className = 'arrow';
+            div.innerHTML = '&#10142;';
+            timeline.appendChild(div);
+        }
+
+        function loadFile(file) {
+            return new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function generateBuffers() {
+            // Scales all images to fit canvas exactly (cover mode)
+            pixelBuffers = images.map(img => {
+                const temp = document.createElement('canvas');
+                temp.width = canvas.width;
+                temp.height = canvas.height;
+                const tCtx = temp.getContext('2d');
+                
+                // Aspect Ratio Fill Logic
+                const sRatio = img.width / img.height;
+                const dRatio = canvas.width / canvas.height;
+                let sW, sH, sX, sY;
+                
+                if (sRatio > dRatio) {
+                    sH = img.height; sW = sH * dRatio; sX = (img.width - sW) / 2; sY = 0;
+                } else {
+                    sW = img.width; sH = sW / dRatio; sX = 0; sY = (img.height - sH) / 2;
+                }
+                
+                tCtx.drawImage(img, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height);
+                return tCtx.getImageData(0, 0, canvas.width, canvas.height);
+            });
+        }
+
+        // --- Sequence Logic ---
+        async function runSequence() {
+            if(isRunning) return;
+            isRunning = true;
+            btnRun.disabled = true;
+            
+            // Recorder Setup
+            const stream = canvas.captureStream(60);
+            const recorder = new MediaRecorder(stream, { 
+                mimeType: 'video/webm; codecs=vp9',
+                videoBitsPerSecond: 5000000 
+            });
+            const chunks = [];
+            recorder.ondataavailable = e => chunks.push(e.data);
+            recorder.onstop = () => downloadVideo(chunks);
+            recorder.start();
+
+            // UI Update
+            statusText.innerText = "RECORDING SCENE";
+            document.querySelector('.rec-dot').style.display = 'block';
+            statusPill.style.opacity = 1;
+
+            // Loop
+            for (let i = 0; i < pixelBuffers.length - 1; i++) {
+                highlightThumb(i);
+                
+                // 1. Hold
+                await playStatic(pixelBuffers[i], FRAMES_HOLD);
+                
+                // 2. Morph
+                await playMorph(pixelBuffers[i], pixelBuffers[i+1], FRAMES_TRANSITION);
+            }
+
+            // Final Hold
+            highlightThumb(pixelBuffers.length - 1);
+            await playStatic(pixelBuffers[pixelBuffers.length - 1], FRAMES_HOLD);
+
+            recorder.stop();
+            statusPill.style.opacity = 0;
+            isRunning = false;
+            btnRun.disabled = false;
+        }
+
+        function highlightThumb(idx) {
+            document.querySelectorAll('.thumb').forEach(t => t.classList.remove('active'));
+            document.getElementById(`t-${idx}`).classList.add('active');
+            document.getElementById(`t-${idx}`).scrollIntoView({ behavior: "smooth", inline: "center" });
+        }
+
+        // --- Modified Download Function ---
+        function downloadVideo(chunks) {
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            
+            // ASK USER PERMISSION BEFORE DOWNLOADING
+            const userConfirmed = confirm("Rendering Complete!\n\nDo you want to download the video now?");
+            
+            if (userConfirmed) {
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `luma-morph-${Date.now()}.webm`;
+                a.click();
+            }
+        }
+
+        // --- Renderers ---
+
+        function playStatic(buffer, frames) {
+            return new Promise(resolve => {
+                let f = 0;
+                function loop() {
+                    ctx.putImageData(buffer, 0, 0); // Redraw for stream
+                    f++;
+                    if(f < frames) requestAnimationFrame(loop);
+                    else resolve();
+                }
+                loop();
+            });
+        }
+
+        function playMorph(bufA, bufB, totalFrames) {
+            return new Promise(resolve => {
+                let frame = 0;
+                const w = canvas.width;
+                const h = canvas.height;
+                const output = ctx.createImageData(w, h);
+                const dOut = output.data;
+                const dA = bufA.data;
+                const dB = bufB.data;
+
+                // Pre-calculate random noise offsets
+                const noiseTable = new Float32Array(1024);
+                for(let i=0; i<1024; i++) noiseTable[i] = Math.random();
+
+                function loop() {
+                    const t = frame / totalFrames; // 0.0 to 1.0
+                    
+                    const smoothT = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+                    const chaos = 1.0 - Math.pow(Math.abs(smoothT * 2 - 1), 1.5); 
+                    const blend = 1 / (1 + Math.exp(-10 * (t - 0.5)));
+
+                    const maxDist = 120 * chaos;
+
+                    for (let y = 0; y < h; y++) {
+                        const rowIdx = y * w; 
+                        
+                        for (let x = 0; x < w; x++) {
+                            const idx = (rowIdx + x) * 4;
+
+                            const rB = dB[idx]; const gB = dB[idx+1]; const bB = dB[idx+2];
+                            const lumaB = (rB * 0.299 + gB * 0.587 + bB * 0.114) / 255;
+                            
+                            const angle = (lumaB * Math.PI * 4) + (smoothT * 2);
+                            const dist = maxDist * (0.2 + lumaB * 0.8);
+
+                            const vecX = Math.cos(angle) * dist;
+                            const vecY = Math.sin(angle) * dist;
+
+                            const srcAx = x + (vecX * smoothT * 2); 
+                            const srcAy = y + (vecY * smoothT * 2);
+
+                            const srcBx = x + (vecX * (1.0 - smoothT) * 2);
+                            const srcBy = y + (vecY * (1.0 - smoothT) * 2);
+
+                            const ax = (srcAx | 0); const ay = (srcAy | 0);
+                            const bx = (srcBx | 0); const by = (srcBy | 0);
+
+                            let redA, greenA, blueA;
+                            if (ax >= 0 && ax < w && ay >= 0 && ay < h) {
+                                const iA = (ay * w + ax) << 2; 
+                                redA = dA[iA]; greenA = dA[iA+1]; blueA = dA[iA+2];
+                            } else {
+                                redA = dA[idx]; greenA = dA[idx+1]; blueA = dA[idx+2];
+                            }
+
+                            let redB, greenB, blueB;
+                            if (bx >= 0 && bx < w && by >= 0 && by < h) {
+                                const iB = (by * w + bx) << 2;
+                                redB = dB[iB]; greenB = dB[iB+1]; blueB = dB[iB+2];
+                            } else {
+                                redB = dB[idx]; greenB = dB[idx+1]; blueB = dB[idx+2];
+                            }
+                            
+                            const finalR = redA + (redB - redA) * blend;
+                            const finalG = greenA + (greenB - greenA) * blend;
+                            const finalB = blueA + (blueB - blueA) * blend;
+
+                            dOut[idx] = finalR;
+                            dOut[idx+1] = finalG;
+                            dOut[idx+2] = finalB;
+                            dOut[idx+3] = 255;
+                        }
+                    }
+
+                    ctx.putImageData(output, 0, 0);
+
+                    frame++;
+                    if (frame < totalFrames) requestAnimationFrame(loop);
+                    else resolve();
+                }
+                
+                loop();
+            });
+        }
+    </script>
+</body>
+</html>
